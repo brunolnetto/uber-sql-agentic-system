@@ -3,13 +3,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 import asyncio
-import os
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 # Import our RAG system
-from main import RAGSystem
-
-app = FastAPI(title="RAG System API", version="1.0.0")
+from test_rag import RAGSystem
 
 # Add CORS middleware
 app.add_middleware(
@@ -36,24 +34,25 @@ class QueryResponse(BaseModel):
     execution_time: float
     timestamp: datetime
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan():
     """Initialize the RAG system on startup"""
     global rag_system
     try:
         rag_system = RAGSystem()
         await rag_system.initialize()
         print("RAG System initialized successfully")
+        
+        yield
     except Exception as e:
         print(f"Failed to initialize RAG system: {e}")
         raise e
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on shutdown"""
-    if rag_system and rag_system.db_manager.pool:
-        await rag_system.db_manager.pool.close()
-        print("Database connections closed")
+    
+app = FastAPI(
+    title="RAG System API", 
+    version="1.0.0",
+    lifespan=lifespan
+)
 
 @app.get("/")
 async def root():

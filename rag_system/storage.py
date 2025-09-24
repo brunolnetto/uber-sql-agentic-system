@@ -1,11 +1,101 @@
-import os
-import asyncio
-from typing import List, Dict, Any
-import asyncpg
+from typing import Optional, List, Dict
+
 from langchain_openai import OpenAIEmbeddings
-from langchain_postgres import PGVector
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
+import asyncpg
+
+class DatabaseManager:
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        self.pool = None
+        
+    async def initialize(self):
+        """Initialize database connection pool and create tables"""
+        self.pool = await asyncpg.create_pool(self.database_url)
+        await self.create_tables()
+        
+    async def create_tables(self):
+        """Create necessary tables for the RAG system"""
+        async with self.pool.acquire() as conn:
+            # Metadata tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    description TEXT,
+                    config JSONB,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Sample business tables
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS rides (
+                    id SERIAL PRIMARY KEY,
+                    ride_date DATE,
+                    driver_name VARCHAR(100),
+                    passenger_count INTEGER,
+                    distance_km DECIMAL(8,2),
+                    fare_amount DECIMAL(10,2),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS platform_eng (
+                    id SERIAL PRIMARY KEY,
+                    service_name VARCHAR(100),
+                    deployment_date DATE,
+                    status VARCHAR(50),
+                    cpu_usage DECIMAL(5,2),
+                    memory_usage DECIMAL(5,2),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS metrics (
+                    id SERIAL PRIMARY KEY,
+                    metric_name VARCHAR(100),
+                    metric_value DECIMAL(12,2),
+                    metric_date DATE,
+                    category VARCHAR(50),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS cogs (
+                    id SERIAL PRIMARY KEY,
+                    product_name VARCHAR(100),
+                    cost_per_unit DECIMAL(10,2),
+                    quantity INTEGER,
+                    total_cost DECIMAL(12,2),
+                    cost_date DATE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+    async def execute_query(self, query: str, params: Optional[List] = None) -> List[Dict]:
+        """Execute SQL query and return results"""
+        async with self.pool.acquire() as conn:
+            if params:
+                rows = await conn.fetch(query, *params)
+            else:
+                rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+    
+    async def get_table_schema(self, table_name: str) -> Dict[str, str]:
+        """Get table schema information"""
+        query = """
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = $1
+            ORDER BY ordinal_position
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, table_name)
+            return {row['column_name']: row['data_type'] for row in rows}
 
 class VectorDatabaseManager:
     """Manages vector database operations for semantic search and retrieval"""
@@ -113,48 +203,9 @@ class VectorDatabaseManager:
             except Exception as e:
                 print(f"Error embedding schema for {table}: {e}")
     
-    async def embed_sample_queries(self):
+    async def embed_queries(self, queries: List[Dict]):
         """Embed sample queries and their SQL translations"""
-        sample_queries = [
-            {
-                "query": "Show me all rides data",
-                "sql": "SELECT * FROM rides ORDER BY ride_date DESC",
-                "workspace": "system",
-                "description": "Retrieve all ride records with details"
-            },
-            {
-                "query": "What's the average cost per unit for our products?",
-                "sql": "SELECT AVG(cost_per_unit) as avg_cost FROM cogs",
-                "workspace": "custom", 
-                "description": "Calculate average cost per unit across all products"
-            },
-            {
-                "query": "How many platform services are currently active?",
-                "sql": "SELECT COUNT(*) FROM platform_eng WHERE status = 'active'",
-                "workspace": "system",
-                "description": "Count active platform services"
-            },
-            {
-                "query": "What's the total revenue from rides this month?",
-                "sql": "SELECT SUM(fare_amount) as total_revenue FROM rides WHERE DATE_TRUNC('month', ride_date) = DATE_TRUNC('month', CURRENT_DATE)",
-                "workspace": "system",
-                "description": "Sum ride revenues for current month"
-            },
-            {
-                "query": "Show me the highest cost products",
-                "sql": "SELECT product_name, cost_per_unit FROM cogs ORDER BY cost_per_unit DESC LIMIT 10",
-                "workspace": "custom",
-                "description": "List products with highest cost per unit"
-            },
-            {
-                "query": "Which services have high CPU usage?", 
-                "sql": "SELECT service_name, cpu_usage FROM platform_eng WHERE cpu_usage > 50 ORDER BY cpu_usage DESC",
-                "workspace": "system",
-                "description": "Find services with CPU usage above 50%"
-            }
-        ]
-        
-        for sample in sample_queries:
+        for sample in queries:
             try:
                 content = f"Query: {sample['query']}\nSQL: {sample['sql']}\nDescription: {sample['description']}"
                 embedding = await self.embeddings.aembed_query(content)
@@ -236,79 +287,3 @@ class VectorDatabaseManager:
             result for result in results 
             if result["document_type"] == "sample_query"
         ]
-
-# Enhanced RAG Agent with Vector Search
-class EnhancedSQLAgent:
-    """Enhanced SQL Agent with semantic search capabilities"""
-    
-    def __init__(self, llm, db_manager, vector_manager):
-        self.llm = llm
-        self.db_manager = db_manager
-        self.vector_manager = vector_manager
-        
-    async def generate_sql_with_context(self, user_query: str, workspace_type: str) -> str:
-        """Generate SQL with semantic context from vector search"""
-        # Get relevant schemas
-        relevant_schemas = await self.vector_manager.get_relevant_schemas(
-            user_query, workspace_type
-        )
-        
-        # Get similar queries for reference
-        similar_queries = await self.vector_manager.get_similar_queries(
-            user_query, workspace_type
-        )
-        
-        # Build context
-        context = "Relevant table information:\n"
-        for schema in relevant_schemas:
-            context += f"{schema['content']}\n\n"
-        
-        if similar_queries:
-            context += "Similar query examples:\n"
-            for similar in similar_queries:
-                context += f"{similar['content']}\n\n"
-        
-        prompt = f"""
-        Generate a SQL query to answer the following question using the provided context:
-        
-        Question: {user_query}
-        Workspace: {workspace_type}
-        
-        Context:
-        {context}
-        
-        Generate only the SQL query, no explanations.
-        """
-        
-        response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-        return response.content.strip()
-
-# Setup script
-async def setup_vector_database():
-    """Setup and populate vector database"""
-    from main import DatabaseManager
-    
-    # Initialize managers
-    vector_db_url = os.getenv("VECTOR_DATABASE_URL", "postgresql://postgres:password@localhost:5433/vector_db")
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    
-    if not openai_api_key:
-        print("ERROR: OPENAI_API_KEY not set")
-        return
-    
-    vector_manager = VectorDatabaseManager(vector_db_url, openai_api_key)
-    await vector_manager.initialize()
-    
-    # Initialize main database manager for schema extraction
-    main_db_url = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/rag_system")
-    db_manager = DatabaseManager(main_db_url)
-    await db_manager.initialize()
-    
-    # Embed schemas and sample queries
-    await vector_manager.embed_table_schemas(db_manager)
-    await vector_manager.embed_sample_queries()
-    
-    print("Vector database setup complete!")
-
-if __name__ == "__main__":
-    asyncio.run(setup_vector_database())

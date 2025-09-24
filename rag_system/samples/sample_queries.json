@@ -1,0 +1,38 @@
+[
+    {
+        "query": "Show me all rides data",
+        "sql": "SELECT * FROM rides ORDER BY ride_date DESC",
+        "workspace": "system",
+        "description": "Retrieve all ride records with details"
+    },
+    {
+        "query": "What's the average cost per unit for our products?",
+        "sql": "SELECT AVG(cost_per_unit) as avg_cost FROM cogs",
+        "workspace": "custom", 
+        "description": "Calculate average cost per unit across all products"
+    },
+    {
+        "query": "How many platform services are currently active?",
+        "sql": "SELECT COUNT(*) FROM platform_eng WHERE status = 'active'",
+        "workspace": "system",
+        "description": "Count active platform services"
+    },
+    {
+        "query": "What's the total revenue from rides this month?",
+        "sql": "SELECT SUM(fare_amount) as total_revenue FROM rides WHERE DATE_TRUNC('month', ride_date) = DATE_TRUNC('month', CURRENT_DATE)",
+        "workspace": "system",
+        "description": "Sum ride revenues for current month"
+    },
+    {
+        "query": "Show me the highest cost products",
+        "sql": "SELECT product_name, cost_per_unit FROM cogs ORDER BY cost_per_unit DESC LIMIT 10",
+        "workspace": "custom",
+        "description": "List products with highest cost per unit"
+    },
+    {
+        "query": "Which services have high CPU usage?", 
+        "sql": "SELECT service_name, cpu_usage FROM platform_eng WHERE cpu_usage > 50 ORDER BY cpu_usage DESC",
+        "workspace": "system",
+        "description": "Find services with CPU usage above 50%"
+    }
+]
