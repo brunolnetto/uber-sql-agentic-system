@@ -42,18 +42,25 @@ class RAGSystem:
         self.db_manager = DatabaseManager(DATABASE_URL)
         self.vector_db_manager = VectorDatabaseManager(VECTOR_DATABASE_URL, OPENAI_API_KEY)
         
-        self.intent_agent = IntentAgent(self.llm)
+        # Agents (pass db_manager to IntentAgent so it can validate workspace names)
+        self.intent_agent = IntentAgent(self.llm, self.db_manager)
         self.sql_agent = SQLAgent(self.llm, self.db_manager, self.vector_db_manager)
         self.table_agent = TableAgent(self.llm)
         self.column_agent = ColumnPragmaAgent(self.llm)
         self.eval_agent = QueryEvaluationAgent(self.llm)
-        
+
         # Initialize LangGraph
         self.graph = self._create_graph()
         
     async def initialize(self):
         """Initialize the system"""
         await self.db_manager.initialize()
+        # Ensure workspaces are registered in DB (seed defaults if empty)
+        await self.db_manager.ensure_default_workspaces()
+
+        # Initialize vector DB manager and embed schemas/queries
+        await self.vector_db_manager.initialize()
+
         await self._populate_sample_data()
         await self._populate_sample_queries()
         
@@ -107,14 +114,14 @@ class RAGSystem:
                 list(cogs)
             )
     
-    def _populate_sample_queries(self):
+    async def _populate_sample_queries(self):
         base = Path(__file__).parent  # use Path.cwd() if running interactively
         path = base / 'samples' / 'sample_queries.json'
 
         with path.open('r', encoding='utf-8') as f:
             sample_queries = json.load(f)
 
-        self.vector_db_manager.embed_queries(sample_queries)
+        await self.vector_db_manager.embed_queries(sample_queries)
     
     def _create_graph(self) -> StateGraph:
         """Create the LangGraph workflow"""

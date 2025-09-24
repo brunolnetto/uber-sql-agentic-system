@@ -1,29 +1,58 @@
 from typing import List, Dict, Any
 import json
 
-import pandas
+import pandas as pd
 
 class IntentAgent:
-    """Agent to classify user intent and route to appropriate workspace"""
-    
-    def __init__(self, llm):
+    """Agent to classify user intent and route to appropriate workspace
+
+    The agent now accepts a `db_manager` so it can validate predicted workspace
+    labels against the registered workspaces in the system. This allows workspace
+    names to be configured in the database instead of hard-coded.
+    """
+
+    def __init__(self, llm, db_manager=None):
         self.llm = llm
-        
+        self.db_manager = db_manager
+
     async def classify_intent(self, user_query: str) -> str:
-        """Classify user intent and return appropriate workspace"""
-        prompt = f"""
-        Analyze the following user query and classify it into one of these workspaces:
-        - system: For queries about rides, platform engineering, or system metrics
-        - custom: For queries about COGS (Cost of Goods Sold), financial metrics, or business analysis
-        
-        Query: {user_query}
-        
-        Return only the workspace name (system or custom).
+        """Classify user intent and return an existing workspace name.
+
+        The LLM is asked to propose a workspace label (free text). If that label
+        matches a registered workspace name it is returned; otherwise, if there
+        is a close match the first matching workspace is returned; otherwise
+        the method falls back to the first registered workspace or 'custom'.
         """
-        
+        prompt = f"""
+        Analyze the following user query and suggest the best workspace name to
+        handle it. Return only a single workspace name (short, one word) that may
+        correspond to a workspace registered in the system.
+
+        Query: {user_query}
+        """
+
         response = await self.llm.ainvoke([{"role": "user", "content": prompt}])
-        workspace = response.content.strip().lower()
-        return "system" if workspace == "system" else "custom"
+        proposed = response.content.strip().lower()
+
+        # If we have a db_manager, validate against registered workspaces
+        if self.db_manager:
+            try:
+                workspaces = await self.db_manager.get_workspaces()
+                names = [w["name"] for w in workspaces]
+                if proposed in names:
+                    return proposed
+                # simple fallback: return first workspace containing the token
+                for name in names:
+                    if proposed in name:
+                        return name
+                # final fallback: return first registered workspace
+                if names:
+                    return names[0]
+            except Exception:
+                pass
+
+        # No db_manager or validation failed -> conservative fallback
+        return proposed if proposed in ("system", "custom") else "custom"
 
 class SQLAgent:
     """Enhanced SQL Agent with semantic search capabilities"""

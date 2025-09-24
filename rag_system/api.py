@@ -99,47 +99,31 @@ async def process_query(request: QueryRequest):
 @app.get("/workspaces")
 async def get_workspaces():
     """Get available workspaces"""
-    return {
-        "workspaces": [
-            {
-                "name": "system",
-                "description": "System workspace for rides, platform engineering, and metrics",
-                "tables": ["rides", "platform_eng", "metrics"]
-            },
-            {
-                "name": "custom", 
-                "description": "Custom workspace for COGS and business analysis",
-                "tables": ["cogs", "metrics"]
-            }
-        ]
-    }
+    if not rag_system:
+        raise HTTPException(status_code=503, detail="RAG system not initialized")
+
+    workspaces = await rag_system.db_manager.get_workspaces()
+    return {"workspaces": workspaces}
 
 @app.get("/tables/{workspace}")
 async def get_workspace_tables(workspace: str):
     """Get tables available in a specific workspace"""
     if not rag_system:
         raise HTTPException(status_code=503, detail="RAG system not initialized")
-    
+
     try:
-        if workspace == "system":
-            tables = ["rides", "platform_eng", "metrics"]
-        elif workspace == "custom":
-            tables = ["cogs", "metrics"]
-        else:
-            raise HTTPException(status_code=404, detail="Workspace not found")
-        
-        table_schemas = {}
-        for table in tables:
-            schema = await rag_system.db_manager.get_table_schema(table)
-            table_schemas[table] = schema
-            
-        return {
-            "workspace": workspace,
-            "tables": table_schemas
-        }
-        
+        tables = await rag_system.db_manager.get_workspace_tables(workspace)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get table schemas: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get workspace tables: {str(e)}")
+
+    table_schemas = {}
+    for table in tables:
+        schema = await rag_system.db_manager.get_table_schema(table)
+        table_schemas[table] = schema
+
+    return {"workspace": workspace, "tables": table_schemas}
 
 @app.get("/sample-data/{table}")
 async def get_sample_data(table: str, limit: int = 5):
@@ -148,20 +132,19 @@ async def get_sample_data(table: str, limit: int = 5):
         raise HTTPException(status_code=503, detail="RAG system not initialized")
     
     try:
-        # Validate table name to prevent SQL injection
-        valid_tables = ["rides", "platform_eng", "metrics", "cogs"]
+        # Validate table name to prevent SQL injection using registered tables
+        registered = await rag_system.db_manager.get_all_registered_tables()
+        valid_tables = {entry["table"] for entry in registered}
         if table not in valid_tables:
             raise HTTPException(status_code=400, detail="Invalid table name")
-        
+
         query = f"SELECT * FROM {table} LIMIT $1"
         results = await rag_system.db_manager.execute_query(query, [limit])
-        
-        return {
-            "table": table,
-            "sample_data": results,
-            "count": len(results)
-        }
-        
+
+        return {"table": table, "sample_data": results, "count": len(results)}
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get sample data: {str(e)}")
 

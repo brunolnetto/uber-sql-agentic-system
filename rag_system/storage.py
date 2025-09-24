@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict
+import json
 
 from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -97,6 +98,85 @@ class DatabaseManager:
             rows = await conn.fetch(query, table_name)
             return {row['column_name']: row['data_type'] for row in rows}
 
+    # Workspace management helpers
+    async def register_workspace(self, name: str, description: str, tables: Optional[List[str]] = None, config: Optional[Dict] = None):
+        """Register a workspace in the metadata `workspaces` table.
+
+        `tables` will be stored inside `config` under the `tables` key.
+        This allows dynamic workspace definitions without sprinkling literals across the codebase.
+        """
+        cfg = config.copy() if config else {}
+        if tables is not None:
+            cfg.setdefault("tables", tables)
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO workspaces (name, description, config)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, config = EXCLUDED.config
+                """,
+                name, description, json.dumps(cfg)
+            )
+
+    async def get_workspaces(self) -> List[Dict]:
+        """Return list of registered workspaces with parsed config."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT name, description, config FROM workspaces ORDER BY id")
+            result = []
+            for r in rows:
+                cfg = r["config"] if r["config"] else {}
+                # If stored as string, try to parse
+                if isinstance(cfg, str):
+                    try:
+                        cfg = json.loads(cfg)
+                    except:
+                        cfg = {}
+                result.append({"name": r["name"], "description": r["description"], "config": cfg})
+            return result
+
+    async def get_workspace_tables(self, workspace_name: str) -> List[str]:
+        """Return the tables configured for a workspace (raises KeyError if workspace not found)."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT config FROM workspaces WHERE name = $1", workspace_name)
+            if not row:
+                raise KeyError(f"Workspace not found: {workspace_name}")
+            cfg = row["config"] or {}
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except:
+                    cfg = {}
+            return cfg.get("tables", [])
+
+    async def get_all_registered_tables(self) -> List[Dict[str, str]]:
+        """Return a list of dicts with table -> workspace mapping from registered workspaces.
+
+        Example: [{"table": "rides", "workspace": "system"}, ...]
+        """
+        workspaces = await self.get_workspaces()
+        result: List[Dict[str, str]] = []
+        for ws in workspaces:
+            tables = ws.get("config", {}).get("tables", [])
+            for t in tables:
+                result.append({"table": t, "workspace": ws["name"]})
+        return result
+
+    async def ensure_default_workspaces(self):
+        """Seed default workspaces if none are registered."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT count(*) as c FROM workspaces")
+            if row and row["c"] > 0:
+                return
+
+        # Register default workspaces
+        await self.register_workspace(
+            "system", "System workspace for rides, platform engineering, and metrics", ["rides", "platform_eng", "metrics"]
+        )
+        await self.register_workspace(
+            "custom", "Custom workspace for COGS and business analysis", ["cogs", "metrics"]
+        )
+
 class VectorDatabaseManager:
     """Manages vector database operations for semantic search and retrieval"""
     
@@ -154,52 +234,75 @@ class VectorDatabaseManager:
             """)
     
     async def embed_table_schemas(self, db_manager):
-        """Embed table schemas and sample data for semantic search"""
-        # Get table schemas from main database
-        tables = ["rides", "platform_eng", "metrics", "cogs"]
-        
+        """Embed table schemas and sample data for semantic search.
+
+        This implementation reads the registered workspaces and their tables from
+        `db_manager.get_all_registered_tables()` so the system no longer depends on
+        hard-coded table lists.
+        """
+        # Get registered tables and their workspace mapping
+        try:
+            tables_info = await db_manager.get_all_registered_tables()
+        except Exception as e:
+            print(f"Could not load registered tables: {e}")
+            tables_info = []
+
+        # Build mapping table -> workspace (if multiple workspaces reference same table, mark as 'both')
+        table_ws: Dict[str, str] = {}
+        for entry in tables_info:
+            t = entry.get("table")
+            ws = entry.get("workspace")
+            if not t:
+                continue
+            if t not in table_ws:
+                table_ws[t] = ws
+            else:
+                if table_ws[t] != ws:
+                    table_ws[t] = "both"
+
+        tables = list(table_ws.keys())
+
         for table in tables:
             try:
                 # Get schema information
                 schema = await db_manager.get_table_schema(table)
-                
+
                 # Get sample data
-                sample_data = await db_manager.execute_query(
-                    f"SELECT * FROM {table} LIMIT 3"
-                )
-                
+                sample_data = await db_manager.execute_query(f"SELECT * FROM {table} LIMIT 3")
+
                 # Create document content
                 schema_text = f"Table: {table}\n"
                 schema_text += "Columns:\n"
                 for col, dtype in schema.items():
                     schema_text += f"- {col}: {dtype}\n"
-                
+
                 if sample_data:
                     schema_text += "\nSample Data:\n"
                     for i, row in enumerate(sample_data[:2], 1):
                         schema_text += f"Row {i}: {dict(row)}\n"
-                
-                # Determine workspace
-                workspace = "system" if table in ["rides", "platform_eng"] else "custom"
-                if table == "metrics":
-                    workspace = "both"
-                
+
+                # Determine workspace from mapping
+                workspace = table_ws.get(table, "custom")
+
                 # Create embedding
                 embedding = await self.embeddings.aembed_query(schema_text)
-                
+
                 # Store in vector database
                 async with self.pool.acquire() as conn:
-                    await conn.execute("""
+                    await conn.execute(
+                        """
                         INSERT INTO document_embeddings 
                         (document_id, content, metadata, embedding, workspace, document_type)
                         VALUES ($1, $2, $3, $4, $5, $6)
                         ON CONFLICT DO NOTHING
-                    """, f"schema_{table}", schema_text, 
-                    {"table_name": table, "columns": list(schema.keys())},
-                    embedding, workspace, "table_schema")
-                    
-                print(f"Embedded schema for table: {table}")
-                
+                        """,
+                        f"schema_{table}", schema_text,
+                        {"table_name": table, "columns": list(schema.keys())},
+                        embedding, workspace, "table_schema"
+                    )
+
+                print(f"Embedded schema for table: {table} (workspace={workspace})")
+
             except Exception as e:
                 print(f"Error embedding schema for {table}: {e}")
     
