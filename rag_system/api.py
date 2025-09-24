@@ -1,38 +1,17 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from fastapi.responses import ORJSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from typing import Optional
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-# Import our RAG system
-from test_rag import RAGSystem
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from .graph import RAGSystem
+from .schemas import QueryRequest, QueryResponse
 
 # Global RAG system instance
 rag_system: Optional[RAGSystem] = None
-
-class QueryRequest(BaseModel):
-    query: str
-    workspace: Optional[str] = None
-
-class QueryResponse(BaseModel):
-    query: str
-    final_answer: str
-    agent_path: list
-    workspace_type: str
-    sql_query: Optional[str]
-    execution_time: float
-    timestamp: datetime
 
 @asynccontextmanager
 async def lifespan():
@@ -48,11 +27,25 @@ async def lifespan():
         print(f"Failed to initialize RAG system: {e}")
         raise e
     
+
 app = FastAPI(
     title="RAG System API", 
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse
 )
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add GZip middleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.get("/")
 async def root():

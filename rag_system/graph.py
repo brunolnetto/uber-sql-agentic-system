@@ -166,7 +166,7 @@ class RAGSystem:
         state["sql_results"] = results
         state["agent_path"].append("sql_execution")
         return state
-    
+
     async def _table_node(self, state: AgentState) -> AgentState:
         """Table processing node"""
         processed_results = await self.table_agent.process_results(
